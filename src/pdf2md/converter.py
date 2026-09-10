@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,9 @@ SUPPORTED_SUFFIXES = {
     ".pdf", ".docx", ".pptx", ".xlsx", ".epub", ".html",
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".tiff",
 }
+
+CACHE_DIR_NAME = ".batches"
+MANIFEST_NAME = "manifest.json"
 
 
 @dataclass(frozen=True)
@@ -48,32 +52,15 @@ class PdfToMarkdownConverter:
         target.parent.mkdir(parents=True, exist_ok=True)
 
         if source.suffix.lower() == ".pdf":
-            page_ranges = self._pdf_batches(source)
+            markdown, image_paths = self._convert_pdf(source, target.parent)
         else:
-            page_ranges = [""]
+            markdown, images = self._run_marker(source, "")
+            image_paths = self._save_images(images, target.parent)
 
-        parts: list[str] = []
-        image_paths: list[Path] = []
-        for number, page_range in enumerate(page_ranges, start=1):
-            logger.info(
-                "Converting batch %d/%d (pages %s)",
-                number,
-                len(page_ranges),
-                page_range or "all",
-            )
-            markdown, images = self._run_marker(source, page_range)
-            parts.append(markdown)
-            image_paths.extend(self._save_images(images, target.parent))
-
-        markdown = self._merge(parts)
         target.write_text(markdown, encoding="utf-8")
 
         logger.info(
-            "Wrote %s (%d chars, %d images, %d batches)",
-            target,
-            len(markdown),
-            len(image_paths),
-            len(page_ranges),
+            "Wrote %s (%d chars, %d images)", target, len(markdown), len(image_paths)
         )
         return ConversionResult(source, target, image_paths)
 
@@ -91,7 +78,51 @@ class PdfToMarkdownConverter:
             )
         return source
 
-    def _pdf_batches(self, source: Path) -> list[str]:
+    def _convert_pdf(self, source: Path, directory: Path) -> tuple[str, list[Path]]:
+        """Convert a PDF batch by batch, reusing batches an earlier run finished."""
+        batches = self._pdf_batches(source)
+        cache = directory / CACHE_DIR_NAME
+        completed = self._completed_batches(cache, source)
+
+        parts: list[str] = []
+        image_paths: list[Path] = []
+        for number, pages in enumerate(batches, start=1):
+            name = f"pages_{pages[0]:04d}-{pages[-1]:04d}.md"
+            entry = completed.get(name)
+
+            if entry is not None:
+                logger.info(
+                    "Skipping batch %d/%d (pages %d-%d, already converted)",
+                    number, len(batches), pages[0], pages[-1],
+                )
+                parts.append((cache / name).read_text(encoding="utf-8"))
+                image_paths.extend(
+                    directory / image for image in entry.get("images", [])
+                )
+                continue
+
+            logger.info(
+                "Converting batch %d/%d (pages %d-%d)",
+                number, len(batches), pages[0], pages[-1],
+            )
+            markdown, images = self._run_marker(source, ",".join(map(str, pages)))
+            saved = self._save_images(images, directory)
+
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / name).write_text(markdown, encoding="utf-8")
+            completed[name] = {
+                "file": name,
+                "pages": pages,
+                "images": [path.name for path in saved],
+            }
+            self._write_manifest(cache, source, completed)
+
+            parts.append(markdown)
+            image_paths.extend(saved)
+
+        return self._merge(parts), image_paths
+
+    def _pdf_batches(self, source: Path) -> list[list[int]]:
         import pypdfium2
         from marker.util import parse_range_str
 
@@ -118,10 +149,59 @@ class PdfToMarkdownConverter:
             )
 
         size = self.settings.batch_size
-        return [
-            ",".join(map(str, pages[start : start + size]))
-            for start in range(0, len(pages), size)
-        ]
+        return [pages[start : start + size] for start in range(0, len(pages), size)]
+
+    def _fingerprint(self, source: Path) -> dict:
+        """Identify the source and the settings a cached batch was produced with."""
+        stat = source.stat()
+        return {
+            "source": {
+                "name": source.name,
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            },
+            "settings": {
+                "mode": self.settings.effective_mode,
+                "page_range": self.settings.page_range,
+                "languages": (
+                    ",".join(self.settings.languages)
+                    if self.settings.languages
+                    else None
+                ),
+                "force_ocr": self.settings.force_ocr,
+                "batch_size": self.settings.batch_size,
+            },
+        }
+
+    def _completed_batches(self, cache: Path, source: Path) -> dict[str, dict]:
+        """Batches an earlier run of this same source and settings already wrote."""
+        manifest = cache / MANIFEST_NAME
+        if not self.settings.resume or not manifest.is_file():
+            return {}
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("Ignoring unreadable manifest %s", manifest)
+            return {}
+        if data.get("fingerprint") != self._fingerprint(source):
+            logger.info("Source or settings changed; converting every batch again")
+            return {}
+        return {
+            entry["file"]: entry
+            for entry in data.get("batches", [])
+            if (cache / entry["file"]).is_file()
+        }
+
+    def _write_manifest(
+        self, cache: Path, source: Path, completed: dict[str, dict]
+    ) -> None:
+        payload = {
+            "fingerprint": self._fingerprint(source),
+            "batches": list(completed.values()),
+        }
+        (cache / MANIFEST_NAME).write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
 
     @staticmethod
     def _merge(parts: list[str]) -> str:

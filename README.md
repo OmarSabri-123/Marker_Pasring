@@ -190,8 +190,24 @@ Markdown file. Change the size when needed:
 python -m pdf2md "document.pdf" --batch-size 16 --mode balanced
 ```
 
-The models stay loaded between batches. This basic implementation does not
-cache completed batches, so an interrupted command starts again.
+The models stay loaded between batches. Each finished batch is written to a
+`.batches/` folder next to the Markdown file, so an interrupted command
+continues where it stopped instead of converting the whole document again:
+
+```text
+files/document/
+    document.md
+    .batches/
+        manifest.json            # source fingerprint and finished batches
+        pages_0000-0031.md
+```
+
+Rerun the same command to resume. Batches are reused only when the source file
+and the conversion settings are unchanged; editing the PDF or changing
+`--mode`, `--pages`, `--langs`, `--force-ocr`, or `--batch-size` converts the
+document again from the start. Use `--no-resume` to ignore the cache, and
+delete `.batches/` when the document is finished and the cache is no longer
+wanted.
 
 **Windows prerequisite for Office and EPUB files:** WeasyPrint needs the
 GTK/Pango libraries, which are not part of its wheel. Without them these

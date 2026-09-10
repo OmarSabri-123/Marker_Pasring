@@ -35,6 +35,7 @@ class ConverterSettings:
     force_ocr: bool = False
     mode: str | None = None
     batch_size: int = DEFAULT_BATCH_SIZE
+    resume: bool = True
 
     def __post_init__(self) -> None:
         if self.mode is not None and self.mode not in VALID_MODES:

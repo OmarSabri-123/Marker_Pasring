@@ -63,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not save extracted images",
     )
     parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Convert every PDF batch again instead of reusing finished ones",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -84,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         "languages": args.langs.split(",") if args.langs else None,
         "force_ocr": args.force_ocr,
         "mode": args.mode,
+        "resume": not args.no_resume,
     }
     if args.output_dir is not None:
         options["output_dir"] = args.output_dir
